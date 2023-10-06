@@ -12,6 +12,7 @@ Abstract:
 
 --*/
 
+use crate::cprintln;
 use crate::kv_access::{KvAccess, KvAccessErr};
 use crate::{
     array::Array4x32, wait, Array4x12, Array4x5, CaliptraError, CaliptraResult, KeyReadArgs,
@@ -136,26 +137,51 @@ impl Hmac384 {
         // caller.
         match &mut tag {
             Hmac384Tag::Array4x12(_arr) => {
-                KvAccess::begin_copy_to_arr(hmac.kv_wr_status(), hmac.kv_wr_ctrl())?
+                KvAccess::begin_copy_to_arr(hmac.kv_wr_status(), hmac.kv_wr_ctrl()).map_err(
+                    |err| {
+                        cprintln!("Error begin_copy_to_kv {}", err.0);
+                        err
+                    },
+                )?
             }
             Hmac384Tag::Key(key) => {
-                KvAccess::begin_copy_to_kv(hmac.kv_wr_status(), hmac.kv_wr_ctrl(), *key)?
+                KvAccess::begin_copy_to_kv(hmac.kv_wr_status(), hmac.kv_wr_ctrl(), *key).map_err(
+                    |err| {
+                        cprintln!("Error begin_copy_to_kv {}", err.0);
+                        err
+                    },
+                )?
             }
         }
 
         // Configure the hardware to use key to use for the HMAC operation
         match key {
-            Hmac384Key::Array4x12(arr) => KvAccess::copy_from_arr(arr, hmac.key())?,
+            Hmac384Key::Array4x12(arr) => {
+                KvAccess::copy_from_arr(arr, hmac.key()).map_err(|err| {
+                    cprintln!("Error copy_from_arr {}", err.0);
+                    err
+                })?
+            }
             Hmac384Key::Key(key) => {
                 KvAccess::copy_from_kv(*key, hmac.kv_rd_key_status(), hmac.kv_rd_key_ctrl())
-                    .map_err(|err| err.into_read_key_err())?
+                    .map_err(|err| err.into_read_key_err())
+                    .map_err(|err| {
+                        cprintln!("Error copy_from_kv {}", err.0);
+                        err
+                    })?
             }
         }
 
         // Generate an LFSR seed.
-        let rand_data = trng.generate()?;
+        let rand_data = trng.generate().map_err(|err| {
+            cprintln!("Error generate {}", err.0);
+            err
+        })?;
         let iv: [u32; 5] = rand_data.0[..5].try_into().unwrap();
-        KvAccess::copy_from_arr(&Array4x5::from(iv), hmac.lfsr_seed())?;
+        KvAccess::copy_from_arr(&Array4x5::from(iv), hmac.lfsr_seed()).map_err(|err| {
+            cprintln!("Error copy_from_arr {}", err.0);
+            err
+        })?;
 
         let op = Hmac384Op {
             hmac_engine: self,

@@ -1,6 +1,7 @@
 // Licensed under the Apache-2.0 license
 
 use crate::{CptraDpeTypes, DpeCrypto, DpeEnv, DpePlatform, Drivers};
+use caliptra_common::cprintln;
 use caliptra_common::mailbox_api::{InvokeDpeReq, InvokeDpeResp, MailboxResp, MailboxRespHeader};
 use caliptra_drivers::{CaliptraError, CaliptraResult};
 use crypto::{AlgLen, Crypto};
@@ -23,6 +24,7 @@ impl InvokeDpeCmd {
         if let Some(cmd) = InvokeDpeReq::read_from(cmd_args) {
             // Validate data length
             if cmd.data_size as usize > cmd.data.len() {
+                cprintln!("[rt] RUNTIME_MAILBOX_INVALID_PARAMS");
                 return Err(CaliptraError::RUNTIME_MAILBOX_INVALID_PARAMS);
             }
 
@@ -38,7 +40,10 @@ impl InvokeDpeCmd {
             );
             let hashed_rt_pub_key = crypto
                 .hash(AlgLen::Bit384, &rt_pub_key.to_der()[1..])
-                .map_err(|_| CaliptraError::RUNTIME_INITIALIZE_DPE_FAILED)?;
+                .map_err(|_| {
+                    cprintln!("[rt] RUNTIME_INITIALIZE_DPE_FAILED");
+                    CaliptraError::RUNTIME_INITIALIZE_DPE_FAILED
+                })?;
             let image_header = &pdata.manifest1.header;
             let pl0_pauser = pdata.manifest1.header.pl0_pauser;
             let mut env = DpeEnv::<CptraDpeTypes> {
@@ -46,12 +51,21 @@ impl InvokeDpeCmd {
                 platform: DpePlatform::new(pl0_pauser, hashed_rt_pub_key, &mut drivers.cert_chain),
             };
 
+            cprintln!("Deserializing command");
             let locality = drivers.mbox.user();
-            let command = Command::deserialize(&cmd.data[..cmd.data_size as usize])
-                .map_err(|_| CaliptraError::RUNTIME_INVOKE_DPE_FAILED)?;
+            let command =
+                Command::deserialize(&cmd.data[..cmd.data_size as usize]).map_err(|_| {
+                    cprintln!("[rt] RUNTIME_INVOKE_DPE_FAILED");
+                    CaliptraError::RUNTIME_INVOKE_DPE_FAILED
+                })?;
             let flags = pdata.manifest1.header.flags;
 
             let mut dpe = &mut drivers.persistent_data.get_mut().dpe;
+
+            cprintln!(
+                "Command 0x{:x}",
+                u32::from_le_bytes(cmd.data[4..8].try_into().unwrap())
+            );
             let resp = match command {
                 Command::GetProfile => Ok(Response::GetProfile(
                     dpe.get_profile(&mut env.platform)
@@ -105,6 +119,7 @@ impl InvokeDpeCmd {
                 _ => Err(CaliptraError::RUNTIME_INVOKE_DPE_FAILED),
             }
         } else {
+            cprintln!("[rt] RUNTIME_INSUFFICIENT_MEMORY");
             Err(CaliptraError::RUNTIME_INSUFFICIENT_MEMORY)
         }
     }

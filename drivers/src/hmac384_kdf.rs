@@ -14,7 +14,7 @@ Abstract:
 
 use caliptra_error::CaliptraResult;
 
-use crate::{Hmac384, Hmac384Key, Hmac384Tag, Trng};
+use crate::{cprintln, Hmac384, Hmac384Key, Hmac384Tag, Trng};
 
 /// Calculate HMAC-384-KDF
 ///
@@ -39,15 +39,33 @@ pub fn hmac384_kdf(
     trng: &mut Trng,
     output: Hmac384Tag,
 ) -> CaliptraResult<()> {
-    let mut hmac_op = hmac.hmac_init(&key, trng, output)?;
+    let mut hmac_op = hmac.hmac_init(&key, trng, output).map_err(|err| {
+        cprintln!("hmac384_kdf: Failed first init {}", err.0);
+        err
+    })?;
 
-    hmac_op.update(&1_u32.to_be_bytes())?;
-    hmac_op.update(label)?;
+    hmac_op.update(&1_u32.to_be_bytes()).map_err(|err| {
+        cprintln!("hmac384_kdf: Failed first update {}", err.0);
+        err
+    })?;
+    hmac_op.update(label).map_err(|err| {
+        cprintln!("hmac384_kdf: Failed second update {}", err.0);
+        err
+    })?;
 
     if let Some(context) = context {
-        hmac_op.update(&[0x00])?;
-        hmac_op.update(context)?;
+        hmac_op.update(&[0x00]).map_err(|err| {
+            cprintln!("hmac384_kdf: Failed third update {}", err.0);
+            err
+        })?;
+        hmac_op.update(context).map_err(|err| {
+            cprintln!("hmac384_kdf: Failed fourth update {}", err.0);
+            err
+        })?;
     }
 
-    hmac_op.finalize()
+    hmac_op.finalize().map_err(|err| {
+        cprintln!("hmac384_kdf: Failed finalize {}", err.0);
+        err
+    })
 }

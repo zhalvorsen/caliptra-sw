@@ -2,6 +2,7 @@
 
 use core::cmp::min;
 
+use caliptra_common::cprintln;
 use caliptra_common::keyids::{
     KEY_ID_DPE_CDI, KEY_ID_DPE_PRIV_KEY, KEY_ID_RT_CDI, KEY_ID_RT_PRIV_KEY, KEY_ID_TMP,
 };
@@ -116,14 +117,22 @@ impl<'a> Crypto for DpeCrypto<'a> {
         match algs {
             AlgLen::Bit256 => Err(CryptoError::Size),
             AlgLen::Bit384 => {
-                let mut hasher = self
-                    .hash_initialize(algs)
-                    .map_err(|_| CryptoError::HashError)?;
-                hasher
-                    .update(measurement.bytes())
-                    .map_err(|_| CryptoError::HashError)?;
-                hasher.update(info).map_err(|_| CryptoError::HashError)?;
-                let context = hasher.finish().map_err(|_| CryptoError::HashError)?;
+                let mut hasher = self.hash_initialize(algs).map_err(|err| {
+                    cprintln!("derive_cdi: Failed hasher.init");
+                    CryptoError::HashError
+                })?;
+                hasher.update(measurement.bytes()).map_err(|err| {
+                    cprintln!("derive_cdi: Failed hasher.update 1");
+                    CryptoError::HashError
+                })?;
+                hasher.update(info).map_err(|err| {
+                    cprintln!("derive_cdi: Failed hasher.update 2");
+                    CryptoError::HashError
+                })?;
+                let context = hasher.finish().map_err(|err| {
+                    cprintln!("derive_cdi: Failed hasher.finish");
+                    CryptoError::HashError
+                })?;
 
                 hmac384_kdf(
                     self.hmac384,
@@ -139,7 +148,10 @@ impl<'a> Crypto for DpeCrypto<'a> {
                     )
                     .into(),
                 )
-                .map_err(|_| CryptoError::CryptoLibError)?;
+                .map_err(|err| {
+                    cprintln!("derive_cdi: Failed hmac384 {}", err.0);
+                    CryptoError::CryptoLibError
+                })?;
                 Ok(KEY_ID_DPE_CDI)
             }
         }
@@ -153,8 +165,12 @@ impl<'a> Crypto for DpeCrypto<'a> {
         info: &[u8],
     ) -> Result<(Self::PrivKey, EcdsaPub), CryptoError> {
         match algs {
-            AlgLen::Bit256 => Err(CryptoError::Size),
+            AlgLen::Bit256 => {
+                cprintln!("Wrong Algorithm");
+                Err(CryptoError::Size)
+            }
             AlgLen::Bit384 => {
+                cprintln!("Deriving key pair for 384");
                 hmac384_kdf(
                     self.hmac384,
                     KeyReadArgs::new(*cdi).into(),
@@ -164,7 +180,10 @@ impl<'a> Crypto for DpeCrypto<'a> {
                     KeyWriteArgs::new(KEY_ID_TMP, KeyUsage::default().set_ecc_key_gen_seed_en())
                         .into(),
                 )
-                .map_err(|_| CryptoError::CryptoLibError)?;
+                .map_err(|err| {
+                    cprintln!("derive_key_pair: Failed hmac384_kdf {}", err.0);
+                    CryptoError::CryptoLibError
+                })?;
 
                 let pub_key = self
                     .ecc384
@@ -178,13 +197,23 @@ impl<'a> Crypto for DpeCrypto<'a> {
                         )
                         .into(),
                     )
-                    .map_err(|_| CryptoError::CryptoLibError)?;
-                let pub_key = EcdsaPub {
-                    x: CryptoBuf::new(&<[u8; AlgLen::Bit384.size()]>::from(pub_key.x))
-                        .map_err(|_| CryptoError::Size)?,
-                    y: CryptoBuf::new(&<[u8; AlgLen::Bit384.size()]>::from(pub_key.y))
-                        .map_err(|_| CryptoError::Size)?,
-                };
+                    .map_err(|err| {
+                        cprintln!("Failed to get pub keys {}", err.0);
+                        CryptoError::CryptoLibError
+                    })?;
+                let pub_key =
+                    EcdsaPub {
+                        x: CryptoBuf::new(&<[u8; AlgLen::Bit384.size()]>::from(pub_key.x))
+                            .map_err(|_| {
+                                cprintln!("Failed to make X CryptoBuf");
+                                CryptoError::Size
+                            })?,
+                        y: CryptoBuf::new(&<[u8; AlgLen::Bit384.size()]>::from(pub_key.y))
+                            .map_err(|_| {
+                                cprintln!("Failed to make Y CryptoBuf");
+                                CryptoError::Size
+                            })?,
+                    };
                 Ok((KEY_ID_DPE_PRIV_KEY, pub_key))
             }
         }
