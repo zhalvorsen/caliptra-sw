@@ -436,8 +436,8 @@ pub fn build_and_sign_image(
     app: &FwId<'static>,
     opts: ImageOptions,
 ) -> anyhow::Result<ImageBundle> {
-    let fmc_elf = build_firmware_elf(fmc)?;
-    let app_elf = build_firmware_elf(app)?;
+    let fmc_elf = build_firmware_elf(fmc).map_err(|err| {println!("Failed build_firmware_elf(fmc)");err})?;
+    let app_elf = build_firmware_elf(app).map_err(|err| {println!("Failed build_firmware_elf(app)");err})?;
     let gen = ImageGenerator::new(OsslCrypto::default());
     let image = gen.generate(&ImageGeneratorConfig {
         fmc: ElfExecutable::new(
@@ -445,18 +445,18 @@ pub fn build_and_sign_image(
             opts.fmc_version,
             opts.fmc_svn,
             opts.fmc_min_svn,
-            image_revision()?,
-        )?,
+            image_revision().map_err(|err| {println!("Failed fmc image_revision()");err})?,
+        ).map_err(|err| {println!("Failed fmc ElfExecutable::new()");err})?,
         runtime: ElfExecutable::new(
             &app_elf,
             opts.app_version,
             opts.app_svn,
             opts.app_min_svn,
-            image_revision()?,
-        )?,
+            image_revision().map_err(|err| {println!("Failed runtime image_revision()");err})?,
+        ).map_err(|err| {println!("Failed runtime ElfExecutable::new()");err})?,
         vendor_config: opts.vendor_config,
         owner_config: opts.owner_config,
-    })?;
+    }).map_err(|err| {println!("Failed gen.generate()");err})?;
     Ok(image)
 }
 
