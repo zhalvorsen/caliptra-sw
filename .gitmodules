@@ -9,3 +9,6 @@
 	path = dpe
 	url = https://github.com/chipsalliance/caliptra-dpe.git
 	branch = main
+[submodule "nextest-archive"]
+	path = nextest-archive
+	url = https://github.com/zhalvorsen/caliptra-nextest-archive.git
