@@ -569,18 +569,20 @@ impl<'a> DmaRecovery<'a> {
     // Request the recovery interface load an image.
     pub fn request_image(&self, fw_image_index: u32) -> CaliptraResult<u32> {
         cprintln!(
-            "[dma-recovery] Requesting recovery image {}",
+            "[dma-recovery-z] Requesting recovery image {}",
             fw_image_index
         );
 
         self.with_regs_mut(|regs_mut| {
             let recovery = regs_mut.sec_fw_recovery_if();
 
+            cprintln!("[dma-recovery] Set reset");
             // set RESET signal to indirect control to load the next image
             recovery
                 .indirect_fifo_ctrl_0()
                 .modify(|val| val.reset(Self::RESET_VAL));
 
+            cprintln!("[dma-recovery] Set prot_cap2");
             // Set PROT_CAP2.AGENT_CAPS
             // - Bit0  to 1 ('Device ID support')
             // - Bit4  to 1 ('Device Status support')
