@@ -248,7 +248,10 @@ impl Dma {
     /// This function will block until the DMA transaction is completed successfully.
     /// On a DMA error, this will loop forever.
     fn wait_for_dma_complete(&self) {
-        self.with_dma(|dma| while dma.status0().read().busy() {});
+        self.with_dma(|dma| while dma.status0().read().busy() {if dma.status0().read().error() {
+            cprintln!("DMA ERROR");
+            break;
+        }});
     }
 
     /// Read data from the DMA FIFO
@@ -524,6 +527,7 @@ impl<'a> DmaRecovery<'a> {
     // Downloads an image from the recovery interface to the mailbox SRAM.
     pub fn download_image_to_mbox(&self, fw_image_index: u32) -> CaliptraResult<u32> {
         let image_size_bytes = self.request_image(fw_image_index)?;
+        cprintln!("Got image size {} bytes for mbox", image_size_bytes);
         // Transfer the image from the recovery interface to the mailbox SRAM.
         let addr = self.base + Self::INDIRECT_FIFO_DATA_OFFSET;
         self.transfer_payload_to_mbox(addr, image_size_bytes, true, 0)?;
@@ -552,6 +556,7 @@ impl<'a> DmaRecovery<'a> {
     // Downloads an image from the recovery interface to the MCU SRAM.
     pub fn download_image_to_mcu(&self, fw_image_index: u32) -> CaliptraResult<u32> {
         let image_size_bytes = self.request_image(fw_image_index)?;
+        cprintln!("Got image size {} bytes for mcu", image_size_bytes);
         let addr = self.base + Self::INDIRECT_FIFO_DATA_OFFSET;
         self.transfer_payload_to_axi(
             addr,
@@ -569,18 +574,20 @@ impl<'a> DmaRecovery<'a> {
     // Request the recovery interface load an image.
     pub fn request_image(&self, fw_image_index: u32) -> CaliptraResult<u32> {
         cprintln!(
-            "[dma-recovery] Requesting recovery image {}",
+            "[dma-recovery-z] Requesting recovery image {}",
             fw_image_index
         );
 
         self.with_regs_mut(|regs_mut| {
             let recovery = regs_mut.sec_fw_recovery_if();
 
+            cprintln!("[dma-recovery] Set reset");
             // set RESET signal to indirect control to load the next image
             recovery
                 .indirect_fifo_ctrl_0()
                 .modify(|val| val.reset(Self::RESET_VAL));
 
+            cprintln!("[dma-recovery] Set prot_cap2");
             // Set PROT_CAP2.AGENT_CAPS
             // - Bit0  to 1 ('Device ID support')
             // - Bit4  to 1 ('Device Status support')
@@ -680,6 +687,7 @@ impl<'a> DmaRecovery<'a> {
             length: payload_len_bytes,
             target: DmaReadTarget::AxiWr(write_addr, write_fixed_addr),
         };
+        cprintln!("About to transfer payload to axi");
         self.exec_dma_read(read_transaction)?;
         Ok(())
     }
@@ -745,7 +753,9 @@ impl<'a> DmaRecovery<'a> {
     fn exec_dma_read(&self, read_transaction: DmaReadTransaction) -> CaliptraResult<()> {
         self.dma.flush();
         self.dma.setup_dma_read(read_transaction, BLOCK_SIZE);
+        cprintln!("Waiting for DMA complete...");
         self.dma.wait_for_dma_complete();
+        cprintln!("DMA complete!");
         Ok(())
     }
 

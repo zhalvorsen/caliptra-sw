@@ -290,13 +290,18 @@ impl RecoveryRegisterInterface {
         val: RvData,
     ) -> Result<(), BusError> {
         // Writes have to be Word aligned
+        println!("indirect_fifo_ctrl_0_write");
         if size != RvSize::Word {
             Err(BusError::StoreAccessFault)?
         }
+        println!("Good size");
         let load: ReadWriteRegister<u32, IndirectCtrl0::Register> = ReadWriteRegister::new(val);
         if load.reg.is_set(IndirectCtrl0::RESET) {
+            println!("Resetting");
             let image_index = ((self.recovery_status.reg.get() >> 4) & 0xf) as usize;
+            println!("Image index: {image_index}");
             if let Some(image) = self.cms_data.get(image_index) {
+                println!("Image found");
                 let cms = load.reg.read(IndirectCtrl0::CMS);
                 if cms != 0 {
                     self.indirect_fifo_status_0
