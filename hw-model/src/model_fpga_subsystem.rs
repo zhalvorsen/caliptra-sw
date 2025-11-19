@@ -15,6 +15,7 @@ use crate::otp_provision::{
     LifecycleControllerState, OtpSwManufPartition,
 };
 use crate::xi3c::XI3cError;
+use crate::SecurityState;
 use crate::{xi3c, BootParams, Error, HwModel, InitParams, ModelError, Output, TrngMode};
 use anyhow::Result;
 use caliptra_api::SocManager;
@@ -1162,9 +1163,36 @@ impl ModelFpgaSubsystem {
         );
     }
 
-    pub fn init_otp(&mut self, fuses: &Fuses) -> Result<(), Box<dyn Error>> {
-        // inefficient but works around bus errors on the FPGA when doing unaligned writes to AXI
+    pub fn init_otp(
+        &self,
+        fuses: &Fuses,
+        otp_init: &[u8],
+        security_state: &SecurityState,
+    ) -> Result<(), Box<dyn Error>> {
         let mut otp_data = self.otp_slice().to_vec();
+        if !otp_init.is_empty() {
+            // write the initial contents of the OTP memory
+            println!("Initializing OTP with initialized data");
+            if otp_init.len() > otp_data.len() {
+                Err(format!(
+                    "OTP initialization data is larger than OTP memory {} > {}",
+                    otp_init.len(),
+                    otp_data.len(),
+                ))?;
+            }
+            otp_data[..otp_init.len()].copy_from_slice(&otp_init);
+        }
+
+        let lc_state = match security_state.device_lifecycle() {
+            DeviceLifecycle::Unprovisioned => LifecycleControllerState::TestUnlocked0,
+            DeviceLifecycle::Manufacturing => LifecycleControllerState::Dev,
+            DeviceLifecycle::Reserved2 => LifecycleControllerState::Raw,
+            DeviceLifecycle::Production => LifecycleControllerState::Prod,
+        };
+        println!("Provisioning lifecycle partition (State: {}).", lc_state);
+        let mem = lc_generate_memory(lc_state, 1)?;
+        let offset = OTP_LIFECYCLE_PARTITION_OFFSET;
+        otp_data[offset..offset + mem.len()].copy_from_slice(&mem);
 
         // Provision default LC tokens.
         println!("Provisioning SECRET_LC_TRANSITION partition.");
@@ -1522,38 +1550,7 @@ impl HwModel for ModelFpgaSubsystem {
         println!("Putting subsystem into reset");
         m.set_subsystem_reset(true);
 
-        // TODO(timothytrippel): move to `init_otp()` eventually.
-        // Users can provide data to initialize OTP a specific way. If an OTP
-        // initialization state is not provided, we proceed with initialization
-        // a default configuration.
-        let mut otp_data = vec![0; OTP_SIZE];
-        if !m.otp_init.is_empty() {
-            // write the initial contents of the OTP memory
-            println!("Initializing OTP with initialized data");
-            if m.otp_init.len() > otp_data.len() {
-                Err(format!(
-                    "OTP initialization data is larger than OTP memory {} > {}",
-                    m.otp_init.len(),
-                    otp_data.len(),
-                ))?;
-            }
-            otp_data[..m.otp_init.len()].copy_from_slice(&m.otp_init);
-        }
-
-        // TODO(timothytrippel): move to `init_otp()` eventually.
-        // Initialize LC state based on the security state of the device.
-        let lc_state = match params.security_state.device_lifecycle() {
-            DeviceLifecycle::Unprovisioned => LifecycleControllerState::TestUnlocked0,
-            DeviceLifecycle::Manufacturing => LifecycleControllerState::Dev,
-            DeviceLifecycle::Reserved2 => LifecycleControllerState::Raw,
-            DeviceLifecycle::Production => LifecycleControllerState::Prod,
-        };
-        println!("Provisioning lifecycle partition (State: {}).", lc_state);
-        let mem = lc_generate_memory(lc_state, 1)?;
-        let offset = OTP_LIFECYCLE_PARTITION_OFFSET;
-        otp_data[offset..offset + mem.len()].copy_from_slice(&mem);
-        let otp_mem = m.otp_slice();
-        otp_mem.copy_from_slice(&otp_data);
+        m.init_otp(&params.fuses, &m.otp_init, &params.security_state)?;
 
         println!("Clearing fifo");
         // Sometimes there's garbage in here; clean it out
@@ -1618,7 +1615,7 @@ impl HwModel for ModelFpgaSubsystem {
     // initialization code should go in `init_otp()`. This function is required
     // for the HwModel trait, but is only relevant for Caliptra Core specific
     // HwModels.
-    fn init_fuses(&mut self, _fuses: &Fuses) {
+    fn init_fuses(&mut self) {
         println!("Skip init_fuses(). Caliptra Core fuses are initialized by MCU ROM.");
     }
 
@@ -1626,10 +1623,6 @@ impl HwModel for ModelFpgaSubsystem {
     where
         Self: Sized,
     {
-        println!("Initializing subsystem OTP memory.");
-        self.init_otp(&boot_params.fuses)?;
-        HwModel::init_fuses(self, &boot_params.fuses);
-
         // TODO(zhalvorsen): this should be referencing the other MCI GPIO word.
         // It looks like the words are backwards in the FPGA wrapper. Update
         // this when the wrapper is updated.
@@ -1831,6 +1824,10 @@ impl HwModel for ModelFpgaSubsystem {
         self.set_subsystem_reset(true);
         std::thread::sleep(std::time::Duration::from_micros(1));
         self.set_subsystem_reset(false);
+    }
+
+    fn fuses(&self) -> &Fuses {
+        unimplemented!()
     }
 }
 
