@@ -22,7 +22,7 @@ use caliptra_drivers::{
     sha2_512_384::{Sha2DigestOpTrait, Sha384},
     Array4x12, Ecc384, Ecc384PrivKeyIn, Ecc384PubKey, Ecc384Scalar, Ecc384Seed, ExportedCdiEntry,
     ExportedCdiHandles, Hmac, HmacMode, KeyId, KeyReadArgs, KeyUsage, KeyVault, KeyWriteArgs,
-    Sha2DigestOp, Sha2_512_384, Trng,
+    Mldsa87, Mldsa87PubKey, Mldsa87Seed, Mldsa87SignRnd, Sha2DigestOp, Sha2_512_384, Trng,
 };
 use constant_time_eq::constant_time_eq;
 use crypto::{
@@ -30,10 +30,12 @@ use crypto::{
         curve_384::{Curve384, EcdsaPub384, EcdsaSignature384},
         EcdsaPubKey, EcdsaSignature,
     },
+    ml_dsa::{ExternalMu, MldsaPublicKey, MldsaSignature},
     Crypto, CryptoError, CryptoSuite, Digest, DigestAlgorithm, DigestType, Hasher, PubKey,
     Signature, SignatureAlgorithm, SignatureType,
 };
 use dpe::{ExportedCdiHandle, U8Bool, MAX_EXPORTED_CDI_SIZE};
+use zerocopy::IntoBytes;
 
 pub struct DpeCrypto<'a> {
     sha2_512_384: &'a mut Sha2_512_384,
@@ -360,5 +362,289 @@ impl Crypto for DpeCrypto<'_> {
         Ok(Signature::Ecdsa(EcdsaSignature::Ecdsa384(
             EcdsaSignature384::from_slice(&sig.r.into(), &sig.s.into()),
         )))
+    }
+}
+
+pub struct DpeMldsaCrypto<'a> {
+    sha2_512_384: &'a mut Sha2_512_384,
+    trng: &'a mut Trng,
+    mldsa: &'a mut Mldsa87,
+    hmac: &'a mut Hmac,
+    key_vault: &'a mut KeyVault,
+    rt_pub_key: &'a mut Mldsa87PubKey,
+    key_id_rt_cdi: KeyId,
+    key_id_rt_priv_key: KeyId,
+    exported_cdi_slots: &'a mut ExportedCdiHandles,
+}
+
+impl<'a> DpeMldsaCrypto<'a> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        sha2_512_384: &'a mut Sha2_512_384,
+        trng: &'a mut Trng,
+        mldsa: &'a mut Mldsa87,
+        hmac: &'a mut Hmac,
+        key_vault: &'a mut KeyVault,
+        rt_pub_key: &'a mut Mldsa87PubKey,
+        key_id_rt_cdi: KeyId,
+        key_id_rt_priv_key: KeyId,
+        exported_cdi_slots: &'a mut ExportedCdiHandles,
+    ) -> Self {
+        Self {
+            sha2_512_384,
+            trng,
+            mldsa,
+            hmac,
+            key_vault,
+            rt_pub_key,
+            key_id_rt_cdi,
+            key_id_rt_priv_key,
+            exported_cdi_slots,
+        }
+    }
+
+    fn derive_cdi_inner(
+        &mut self,
+        measurement: &Digest,
+        info: &[u8],
+        key_id: KeyId,
+    ) -> Result<<Self as crypto::Crypto>::Cdi, CryptoError> {
+        let mut hasher = self.hash_initialize()?;
+        hasher.update(measurement.as_slice())?;
+        hasher.update(info)?;
+        let context = hasher.finish()?;
+
+        hmac_kdf(
+            self.hmac,
+            KeyReadArgs::new(self.key_id_rt_cdi).into(),
+            b"derive_cdi",
+            Some(context.as_slice()),
+            self.trng,
+            KeyWriteArgs::new(
+                key_id,
+                KeyUsage::default()
+                    .set_hmac_key_en()
+                    .set_mldsa_key_gen_seed_en(),
+            )
+            .into(),
+            HmacMode::Hmac384,
+        )
+        .map_err(|e| CryptoError::CryptoLibError(u32::from(e)))?;
+        Ok(key_id)
+    }
+
+    fn derive_key_pair_inner(
+        &mut self,
+        cdi: &<Self as crypto::Crypto>::Cdi,
+        label: &[u8],
+        info: &[u8],
+        key_id: KeyId,
+    ) -> Result<(<Self as crypto::Crypto>::PrivKey, PubKey), CryptoError> {
+        hmac_kdf(
+            self.hmac,
+            KeyReadArgs::new(*cdi).into(),
+            label,
+            Some(info),
+            self.trng,
+            KeyWriteArgs::new(key_id, KeyUsage::default().set_mldsa_key_gen_seed_en()).into(),
+            HmacMode::Hmac384,
+        )
+        .map_err(|e| CryptoError::CryptoLibError(u32::from(e)))?;
+
+        let pub_key = self
+            .mldsa
+            .key_pair(Mldsa87Seed::Key(KeyReadArgs::new(key_id)), self.trng, None)
+            .map_err(|e| CryptoError::CryptoLibError(u32::from(e)))?;
+        Ok((key_id, PubKey::MlDsa(MldsaPublicKey(pub_key.into()))))
+    }
+
+    pub fn get_cdi_from_exported_handle(
+        &mut self,
+        exported_cdi_handle: &[u8; MAX_EXPORTED_CDI_SIZE],
+    ) -> Option<<Self as crypto::Crypto>::Cdi> {
+        for cdi_slot in self.exported_cdi_slots.entries.iter() {
+            match cdi_slot {
+                ExportedCdiEntry {
+                    key,
+                    handle,
+                    active,
+                } if active.get() && constant_time_eq(handle, exported_cdi_handle) => {
+                    return Some(*key)
+                }
+                _ => (),
+            }
+        }
+        None
+    }
+}
+
+impl Drop for DpeMldsaCrypto<'_> {
+    fn drop(&mut self) {
+        let _ = self.key_vault.erase_key(KEY_ID_DPE_CDI);
+        let _ = self.key_vault.erase_key(KEY_ID_DPE_PRIV_KEY);
+        let _ = self.key_vault.erase_key(KEY_ID_TMP);
+    }
+}
+
+impl CryptoSuite for DpeMldsaCrypto<'_> {}
+impl SignatureType for DpeMldsaCrypto<'_> {
+    const SIGNATURE_ALGORITHM: SignatureAlgorithm = ExternalMu::SIGNATURE_ALGORITHM;
+}
+
+impl DigestType for DpeMldsaCrypto<'_> {
+    const DIGEST_ALGORITHM: DigestAlgorithm = crypto::Sha384::DIGEST_ALGORITHM;
+}
+
+impl Crypto for DpeMldsaCrypto<'_> {
+    type Cdi = KeyId;
+    type Hasher<'b>
+        = DpeHasher<'b>
+    where
+        Self: 'b;
+    type PrivKey = KeyId;
+
+    fn rand_bytes(&mut self, dst: &mut [u8]) -> Result<(), CryptoError> {
+        for chunk in dst.chunks_mut(48) {
+            let trng_bytes = <[u8; 48]>::from(
+                self.trng
+                    .generate()
+                    .map_err(|e| CryptoError::CryptoLibError(u32::from(e)))?,
+            );
+            chunk.copy_from_slice(&trng_bytes[..chunk.len()])
+        }
+        Ok(())
+    }
+
+    fn hash_initialize(&mut self) -> Result<Self::Hasher<'_>, CryptoError> {
+        let op = self
+            .sha2_512_384
+            .sha384_digest_init()
+            .map_err(|e| CryptoError::HashError(u32::from(e)))?;
+        Ok(DpeHasher::new(op))
+    }
+
+    #[cfg_attr(not(feature = "no-cfi"), cfi_impl_fn)]
+    fn derive_exported_cdi(
+        &mut self,
+        measurement: &Digest,
+        info: &[u8],
+    ) -> Result<ExportedCdiHandle, CryptoError> {
+        let mut exported_cdi_handle = [0; MAX_EXPORTED_CDI_SIZE];
+        self.rand_bytes(&mut exported_cdi_handle)?;
+
+        // Currently we only use one slot for export CDIs.
+        let cdi_slot = KEY_ID_EXPORTED_DPE_CDI;
+        // Copy the CDI slots to work around the borrow checker.
+        let mut slots_clone = self.exported_cdi_slots.clone();
+
+        for slot in slots_clone.entries.iter_mut() {
+            match slot {
+                // Matching existing slot
+                ExportedCdiEntry {
+                    key,
+                    handle: _,
+                    active,
+                } if active.get() && *key == cdi_slot => {
+                    Err(CryptoError::ExportedCdiHandleDuplicateCdi)?
+                }
+                ExportedCdiEntry {
+                    key: _,
+                    handle: _,
+                    active,
+                } if !active.get() => {
+                    // Empty slot
+                    let cdi = self.derive_cdi_inner(measurement, info, cdi_slot)?;
+                    *slot = ExportedCdiEntry {
+                        key: cdi,
+                        handle: exported_cdi_handle,
+                        active: U8Bool::new(true),
+                    };
+                    // We need to update `self.exported_cdi_slots` with our mutation.
+                    *self.exported_cdi_slots = slots_clone;
+                    return Ok(exported_cdi_handle);
+                }
+                // Used slot for a different CDI.
+                _ => (),
+            }
+        }
+        // Never found an available slot.
+        Err(CryptoError::ExportedCdiHandleLimitExceeded)
+    }
+
+    #[cfg_attr(not(feature = "no-cfi"), cfi_impl_fn)]
+    fn derive_cdi(&mut self, measurement: &Digest, info: &[u8]) -> Result<Self::Cdi, CryptoError> {
+        self.derive_cdi_inner(measurement, info, KEY_ID_DPE_CDI)
+    }
+
+    #[cfg_attr(not(feature = "no-cfi"), cfi_impl_fn)]
+    fn derive_key_pair(
+        &mut self,
+        cdi: &Self::Cdi,
+        label: &[u8],
+        info: &[u8],
+    ) -> Result<(Self::PrivKey, PubKey), CryptoError> {
+        self.derive_key_pair_inner(cdi, label, info, KEY_ID_DPE_PRIV_KEY)
+    }
+
+    #[cfg_attr(not(feature = "no-cfi"), cfi_impl_fn)]
+    fn derive_key_pair_exported(
+        &mut self,
+        exported_handle: &ExportedCdiHandle,
+        label: &[u8],
+        info: &[u8],
+    ) -> Result<(Self::PrivKey, PubKey), CryptoError> {
+        let cdi = {
+            let mut cdi = None;
+            for cdi_slot in self.exported_cdi_slots.entries.iter() {
+                match cdi_slot {
+                    ExportedCdiEntry {
+                        key,
+                        handle,
+                        active,
+                    } if active.get() && constant_time_eq(handle, exported_handle) => {
+                        cdi = Some(*key);
+                        break;
+                    }
+                    _ => (),
+                }
+            }
+            cdi.ok_or(CryptoError::InvalidExportedCdiHandle)
+        }?;
+        self.derive_key_pair_inner(&cdi, label, info, KEY_ID_TMP)
+    }
+
+    fn sign_with_alias(&mut self, digest: &Digest) -> Result<Signature, CryptoError> {
+        let pub_key = PubKey::MlDsa(MldsaPublicKey((*self.rt_pub_key).into()));
+        self.sign_with_derived(digest, &self.key_id_rt_priv_key.clone(), &pub_key)
+    }
+
+    fn sign_with_derived(
+        &mut self,
+        digest: &Digest,
+        priv_key: &Self::PrivKey,
+        pub_key: &PubKey,
+    ) -> Result<Signature, CryptoError> {
+        let priv_key_args = KeyReadArgs::new(*priv_key);
+        let priv_key = Mldsa87Seed::Key(priv_key_args);
+
+        let PubKey::MlDsa(MldsaPublicKey(pub_key)) = pub_key else {
+            return Err(CryptoError::MismatchedAlgorithm);
+        };
+        let pub_key = Mldsa87PubKey::from(pub_key);
+
+        let Digest::Sha384(crypto::Sha384(digest)) = digest else {
+            return Err(CryptoError::MismatchedAlgorithm);
+        };
+
+        // Deterministic signing
+        let sign_rnd = Mldsa87SignRnd::default();
+        let sig = self
+            .mldsa
+            .sign_var(priv_key, &pub_key, digest, &sign_rnd, self.trng)
+            .map_err(|e| CryptoError::CryptoLibError(u32::from(e)))?;
+
+        let mut dpe_sig = [0u8; 4627];
+        dpe_sig.copy_from_slice(&sig.as_bytes()[..4627]);
+        Ok(Signature::MlDsa(MldsaSignature(dpe_sig)))
     }
 }
