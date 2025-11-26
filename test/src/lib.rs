@@ -10,6 +10,7 @@ use zerocopy::IntoBytes;
 
 pub mod crypto;
 pub mod derive;
+pub mod dpe;
 mod redact;
 mod unwrap_single;
 pub mod x509;
