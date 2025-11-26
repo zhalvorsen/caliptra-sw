@@ -51,17 +51,17 @@ use caliptra_registers::{
 };
 use caliptra_x509::{NotAfter, NotBefore};
 use crypto::Digest;
+use dpe::commands::DeriveContextCmd;
 use dpe::context::{Context, ContextState, ContextType};
 use dpe::tci::TciMeasurement;
 use dpe::validation::DpeValidator;
-use dpe::DpeFlags;
 use dpe::MAX_HANDLES;
 use dpe::{
-    commands::{CommandExecution, DeriveContextCmd, DeriveContextFlags},
+    commands::{CommandExecution, DeriveContextFlags},
     context::ContextHandle,
     dpe_instance::{DpeEnv, DpeInstance},
-    DPE_PROFILE,
 };
+use dpe::{DpeFlags, DpeProfile};
 use ureg::MmioMut;
 
 use core::cmp::Ordering::{Equal, Greater};
@@ -536,21 +536,19 @@ impl Drivers {
 
         // Initialize DPE with the RT journey PCR
         let rt_journey_measurement =
-            <[u8; DPE_PROFILE.hash_size()]>::from(&drivers.pcr_bank.read_pcr(RT_FW_JOURNEY_PCR));
+            TciMeasurement(drivers.pcr_bank.read_pcr(RT_FW_JOURNEY_PCR).into());
         let mut dpe = DpeInstance::new_auto_init(
             &mut env,
+            DpeProfile::P384Sha384,
             u32::from_be_bytes(*b"RTJM"),
-            rt_journey_measurement,
+            &rt_journey_measurement,
         )
         .map_err(|_| CaliptraError::RUNTIME_INITIALIZE_DPE_FAILED)?;
 
         // Call DeriveContext to create a measurement for the mailbox valid pausers and change locality to the pl0 pauser locality
         let derive_context_resp = DeriveContextCmd {
             handle: ContextHandle::default(),
-            data: valid_pauser_hash
-                .as_bytes()
-                .try_into()
-                .map_err(|_| CaliptraError::RUNTIME_ADD_VALID_PAUSER_MEASUREMENT_TO_DPE_FAILED)?,
+            data: TciMeasurement(valid_pauser_hash.into()),
             flags: DeriveContextFlags::MAKE_DEFAULT
                 | DeriveContextFlags::CHANGE_LOCALITY
                 | DeriveContextFlags::ALLOW_NEW_CONTEXT_TO_EXPORT
@@ -588,9 +586,11 @@ impl Drivers {
             let tci_type = u32::from_ne_bytes(measurement_log_entry.metadata);
             let derive_context_resp = DeriveContextCmd {
                 handle: ContextHandle::default(),
-                data: measurement_data
-                    .try_into()
-                    .map_err(|_| CaliptraError::RUNTIME_ADD_ROM_MEASUREMENTS_TO_DPE_FAILED)?,
+                data: TciMeasurement(
+                    measurement_data
+                        .try_into()
+                        .map_err(|_| CaliptraError::RUNTIME_ADD_ROM_MEASUREMENTS_TO_DPE_FAILED)?,
+                ),
                 flags: DeriveContextFlags::MAKE_DEFAULT
                     | DeriveContextFlags::CHANGE_LOCALITY
                     | DeriveContextFlags::ALLOW_NEW_CONTEXT_TO_EXPORT

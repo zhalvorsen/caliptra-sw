@@ -1308,6 +1308,8 @@ dependencies = [
  "arrayvec",
  "caliptra-cfi-derive-git",
  "caliptra-cfi-lib-git",
+ "ml-dsa 0.0.4",
+ "pkcs8 0.10.2",
  "zerocopy",
  "zeroize",
 ]
